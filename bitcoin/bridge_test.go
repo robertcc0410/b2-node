@@ -5,7 +5,6 @@ import (
 	"math/big"
 	"os"
 	"path"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -90,9 +89,7 @@ func TestLocalDeposit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hex, err := bridge.Deposit(tc.args[0].(string), tc.args[1].(string), tc.args[2].(int64))
 			if err != nil {
-				if !strings.Contains(err.Error(), bitcoin.ErrBrdigeDepositTxIDExist.Error()) {
-					assert.Equal(t, tc.err, err)
-				}
+				assert.Equal(t, tc.err, err)
 			}
 			t.Log(hex)
 		})

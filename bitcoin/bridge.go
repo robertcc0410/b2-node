@@ -12,10 +12,10 @@ import (
 	"path"
 
 	b2aa "github.com/b2network/b2-go-aa-utils"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
@@ -64,36 +64,49 @@ func NewBridge(bridgeCfg BridgeConfig, abiFileDir string) (*Bridge, error) {
 }
 
 // Deposit to ethereum
-func (b *Bridge) Deposit(hash string, bitcoinAddress string, amount int64) ([]byte, error) {
+func (b *Bridge) Deposit(hash string, bitcoinAddress string, amount int64) (string, error) {
 	if bitcoinAddress == "" {
-		return nil, fmt.Errorf("bitcoin address is empty")
+		return "", fmt.Errorf("bitcoin address is empty")
 	}
 
 	if hash == "" {
-		return nil, fmt.Errorf("tx id is empty")
+		return "", fmt.Errorf("tx id is empty")
 	}
 
 	ctx := context.Background()
 
 	toAddress, err := b.BitcoinAddressToEthAddress(bitcoinAddress)
 	if err != nil {
-		return nil, fmt.Errorf("btc address to eth address err:%w", err)
+		return "", fmt.Errorf("btc address to eth address err:%w", err)
 	}
 
-	txHash, err := chainhash.NewHashFromStr(hash)
+	// TODO: hash check
+	// txHash, err := chainhash.NewHashFromStr(hash)
+	// if err != nil {
+	// 	return "", err
+	// }
+
+	data, err := b.ABIPack(b.ABI, "deposit", common.HexToAddress(toAddress), new(big.Int).SetInt64(amount))
 	if err != nil {
-		return nil, err
+		return "", fmt.Errorf("abi pack err:%w", err)
 	}
 
-	data, err := b.ABIPack(b.ABI, "depositV2", txHash, common.HexToAddress(toAddress), new(big.Int).SetInt64(amount))
+	receipt, err := b.ethContractCall(ctx, b.EthPrivKey, data)
 	if err != nil {
-		return nil, fmt.Errorf("abi pack err:%w", err)
+		return "", fmt.Errorf("eth call err:%w", err)
 	}
 
-	return b.ethContractCall(ctx, b.EthPrivKey, data)
+	if receipt.Status != 1 {
+		receiptStr, err := receipt.MarshalJSON()
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("tx failed, receipt:%s", receiptStr)
+	}
+	return receipt.TxHash.String(), nil
 }
 
-func (b *Bridge) ethContractCall(ctx context.Context, priv *ecdsa.PrivateKey, data []byte) ([]byte, error) {
+func (b *Bridge) ethContractCall(ctx context.Context, priv *ecdsa.PrivateKey, data []byte) (*types.Receipt, error) {
 	client, err := ethclient.Dial(b.EthRPCURL)
 	if err != nil {
 		return nil, err
@@ -104,14 +117,42 @@ func (b *Bridge) ethContractCall(ctx context.Context, priv *ecdsa.PrivateKey, da
 	if !ok {
 		return nil, fmt.Errorf("error casting public key to ECDSA")
 	}
-
-	callMsg := ethereum.CallMsg{
-		From: crypto.PubkeyToAddress(*publicKeyECDSA),
-		To:   &b.ContractAddress,
-		Data: data,
+	nonce, err := client.PendingNonceAt(ctx, crypto.PubkeyToAddress(*publicKeyECDSA))
+	if err != nil {
+		return nil, err
+	}
+	gasPrice, err := client.SuggestGasPrice(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	return client.CallContract(ctx, callMsg, nil)
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce:    nonce,
+		To:       &b.ContractAddress,
+		Value:    big.NewInt(0),
+		Gas:      b.GasLimit,
+		GasPrice: gasPrice,
+		Data:     data,
+	})
+
+	chainID, err := client.ChainID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// sign tx
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), priv)
+	if err != nil {
+		return nil, err
+	}
+
+	// send tx
+	err = client.SendTransaction(ctx, signedTx)
+	if err != nil {
+		return nil, err
+	}
+
+	// wait tx confirm
+	return bind.WaitMined(ctx, client, signedTx)
 }
 
 // ABIPack the given method name to conform the ABI. Method call's data
