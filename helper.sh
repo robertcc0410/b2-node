@@ -1,8 +1,7 @@
 set -x
 
 init() {
-    apt install pipx
-    pipx install toml-cli
+    cargo install toml-cli
 }
 
 info() {
@@ -57,5 +56,10 @@ probeBal(){
     ethermintd keys parse --help
     ethermintd keys parse ethm17w0adeg64ky0daxwd2ugyuneellmjgnxcn4sgz
     # ethermintd keys list --keyring-backend test 
+}
+
+initChain(){
+    exec >"$FUNCNAME.log" 2>&1
+    bash tests/solidity/init-test-node.sh init
 }
 $@
